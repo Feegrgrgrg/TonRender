@@ -5,6 +5,7 @@ from bot.handlers import dp
 
 
 
+
 async def main():
     bot = Bot(token=TOKEN)
     dp = Dispatcher(bot)

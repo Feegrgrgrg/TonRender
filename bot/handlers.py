@@ -3,12 +3,12 @@ import sqlite3
 from database import add_user_to_db
 from aiogram import Dispatcher
 from config import TOKEN
-from bot import is_admin, send_options_menu, post_to_channel
+from bot import is_admin, send_options_menu, post_to_channel, post_render, send_user_notification
 from bot import generate_random_text, check_captcha
 from datetime import datetime, timedelta
 from captcha.image import ImageCaptcha
 import asyncio
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputFile
 from bot import check_subscription
 from config import CHANNEL_USERNAME
 from bot import main2, create_invoice, check_invoice_payment
@@ -30,13 +30,17 @@ c = conn.cursor()
 user_captcha = {}
 user_data = {}
 
+
+
+
+
+
 @dp.message_handler(commands=['admin'])
 async def admin_command(message: types.Message):
     user_id = message.from_user.id
     args = message.text.split()
     if await is_admin(user_id):
         if len(args) == 1:
-
             conn = sqlite3.connect('users.db')
             cursor = conn.cursor()
             cursor.execute('SELECT id, username, free_draws FROM users')
@@ -45,7 +49,6 @@ async def admin_command(message: types.Message):
 
             if users:
                 response = "Используй команду:\n /admin  id  кол-во отрисовок \n"
-
             else:
                 response = "No users found."
 
@@ -69,6 +72,13 @@ async def admin_command(message: types.Message):
                 cursor.execute('UPDATE users SET free_draws = ? WHERE id = ?', (new_free_draws, user_id))
                 conn.commit()
                 conn.close()
+                
+                # Отправляем уведомление администратору
+                await post_render(user_id, user[0], new_free_draws, message)
+                
+                # Отправляем уведомление пользователю
+                await send_user_notification(user_id, new_free_draws, message)
+                
                 await message.reply(f"Пользователь {user[0]} имеет {new_free_draws} отрисовок")
             else:
                 conn.close()
@@ -77,6 +87,7 @@ async def admin_command(message: types.Message):
             await message.reply("Использование: /admin id кол-во отрисовок")
     else:
         await bot.send_message(message.chat.id, 'У вас нет прав для выполнения этого действия. /start')
+
         
         
         
@@ -132,47 +143,55 @@ async def start1(message: types.Message):
             free_draws, last_scan_time_str = user_data
             
             if last_scan_time_str:
-                
                 last_scan_time = datetime.fromisoformat(last_scan_time_str)
             else:
                 last_scan_time = None
 
             # Получение текущего времени
             current_time = datetime.now()
-
+            
             if last_scan_time is None or (current_time - last_scan_time) >= timedelta(days=1):
                 # Обновляем время сканирования
                 last_scan_time = current_time
-                c.execute("UPDATE users SET last_scan_time=?, free_draws=? WHERE id=?", 
-                          (last_scan_time.isoformat(), free_draws + 1, user.id))
+                c.execute("UPDATE users SET last_scan_time=? WHERE id=?", 
+                          (last_scan_time.isoformat(), user.id))
                 conn.commit()
                 print("Время сканирования обновлено успешно.")
-                await message.answer("Время бесплатной отрисовки")
+
+                # Обновляем free_draws, если равно 0
+                if free_draws == 0:
+                    c.execute("UPDATE users SET free_draws=free_draws+1 WHERE id=?", 
+                              (user.id,))
+                    conn.commit()
+                    print("Количество бесплатных попыток обновлено успешно.")
+
+
+                
             else:
                 print("Время сканирования уже обновлено за последние 24 часа.")
+            
+            # Генерация капчи
+            
+
 
         # Если пользователь уже есть в базе данных, пропускаем капчу
-        await send_options_menu(message)
+            await send_options_menu(message)
     else:
         # Если пользователя нет в базе данных, добавляем его
         await add_user_to_db(user)
-
-        if last_scan_time is None or (current_time - last_scan_time) >= timedelta(days=1):
-            # Обновляем время сканирования
-            last_scan_time = current_time
-            c.execute("UPDATE users SET last_scan_time=?, free_draws=? WHERE id=?", 
-                      (last_scan_time.isoformat(), free_draws + 1, user.id))
-            conn.commit()
-            print("Время сканирования обновлено успешно.")
-            await message.answer("Время бесплатной отрисовки")
-        else:
-            print("Время сканирования уже обновлено за последние 24 часа.")
+        free_draws = 0  # Задаем значение по умолчанию для free_draws
         
-        
-        # Проверяем количество доступных бесплатных отрисовок у пользователя
-        c.execute("SELECT free_draws FROM users WHERE id=?", (user.id,))
-        free_draws = c.fetchone()[0]
+        # Получаем текущее время
+        current_time = datetime.now()
 
+        # Обновляем время сканирования
+        last_scan_time = current_time
+        c.execute("UPDATE users SET last_scan_time=?, free_draws=? WHERE id=?", 
+                  (last_scan_time.isoformat(), free_draws + 1, user.id))
+        conn.commit()
+        print("Время сканирования обновлено успешно.")
+
+        
         # Генерация капчи
         captcha_text = generate_random_text()
         print(f'Текст капчи: {captcha_text}')
@@ -187,8 +206,8 @@ async def start1(message: types.Message):
         
         # Сохраняем текст капчи для данного пользователя
         user_captcha[message.chat.id] = captcha_text
+
         
-# Обработчик текстовых сообщений
 @dp.message_handler(content_types=types.ContentType.TEXT)
 async def handle_message(message: types.Message):
     if message.chat.id in user_captcha:
@@ -196,9 +215,9 @@ async def handle_message(message: types.Message):
         if await check_captcha(message.text, captcha_text):
             await asyncio.sleep(2)
             await bot.send_message(message.chat.id, "✅")
-            await send_options_menu(message)
             # Удаляем запись о капче после успешной проверки
             del user_captcha[message.chat.id]
+            await send_options_menu(message)
         else:
             await message.answer('Неправильный текст капчи.')
             return
@@ -210,32 +229,80 @@ async def handle_message(message: types.Message):
         
         # Проверяем, есть ли данные для пользователя и правильный ли формат
         text = [line.strip() for line in message.text.split("\n")]
-        if len(text) != 4:
-            print('11гв')
-            return
+        print(f"Received text: {text}")  # Отладочное сообщение
         
-        await bot.send_message(message.chat.id, 'Отправьте изображение QR-кода.🖥')
+        if len(text) == 4:
+            await bot.send_message(message.chat.id, 'Отправьте изображение QR-кода.🖥')
 
-        # Сохраняем данные пользователя
-        user_data[message.chat.id] = {
-            'time': text[0],
-            'coin': text[1],
-            'pricetime': text[2],
-            'x': text[3]
-        }
+            # Сохраняем данные пользователя
+            user_data[message.chat.id] = {
+                'time': text[0],
+                'coin': text[1],
+                'pricetime': text[2][:100],  # Обрезка до 100 символов
+                'x': text[3]
+            }
+            print(f"User data saved for 4 lines: {user_data[message.chat.id]}")  # Отладочное сообщение
+        elif len(text) == 5:
+            # Объединяем третью и четвертую строки
+            pricetime = f"{text[2]} {text[3]}"
+            pricetime = pricetime[:160]  # Обрезка до 100 символов
+            
+            await bot.send_message(message.chat.id, 'Отправьте изображение QR-кода.🖥')
+
+            # Сохраняем данные пользователя
+            user_data[message.chat.id] = {
+                'time': text[0],
+                'coin': text[1],
+                'pricetime': pricetime,
+                'x': text[4]
+            }
+            print(f"User data saved for 5 lines: {user_data[message.chat.id]}")  # Отладочное сообщение
+        elif len(text) > 5:
+            # Извлекаем первые две строки и последнюю
+            time = text[0]
+            coin = text[1]
+            x = text[-1]
+            # Объединяем строки между третьей и предпоследней для поля pricetime
+            pricetime = " ".join(text[2:-1]).strip()
+            
+            # Разбиваем pricetime на строки с максимальной длиной 160 символов
+            words = pricetime.split()
+            lines = []
+            current_line = ''
+            for word in words:
+                if len(current_line + ' ' + word) <= 160:
+                    current_line += ' ' + word
+                else:
+                    lines.append(current_line.strip())
+                    current_line = word
+            if current_line:
+                lines.append(current_line.strip())
+            
+            # Ограничиваем количество строк до 4
+            pricetime = '\n'.join(lines[:4])
+            
+            await bot.send_message(message.chat.id, 'Отправьте изображение QR-кода.🖥')
+
+            # Сохраняем данные пользователя
+            user_data[message.chat.id] = {
+                'time': time,
+                'coin': coin,
+                'pricetime': pricetime,
+                'x': x
+            }
+            print(f"User data saved for more than 5 lines: {user_data[message.chat.id]}")  # Отладочное сообщение
+        else:
+            await bot.send_message(message.chat.id, 'Пожалуйста, отправьте корректные данные.')
+            print(f"Invalid data received: {text}")  # Отладочное сообщение
+            return
+
+
 
 @dp.callback_query_handler() 
 async def process_callback_query(call: types.CallbackQuery):
     chat_id = call.message.chat.id
     payment_url = None
     
-    if await check_subscription(chat_id):
-        print(2)
-    else:
-        await bot.send_message(chat_id, 'Пожалуйста, подпишитесь на наш канал, чтобы продолжить.🙏', reply_markup=InlineKeyboardMarkup().add(
-            InlineKeyboardButton('Подписаться на канал', url=f'https://t.me/{CHANNEL_USERNAME[1:]}'),
-            InlineKeyboardButton('Проверить подписку', callback_data='check_subscription')
-        ))
     
     if call.data == 'Try':
         c.execute("SELECT free_draws FROM users WHERE id=?", (chat_id,))
@@ -279,11 +346,18 @@ async def process_callback_query(call: types.CallbackQuery):
         
     
     elif call.data == 'balance':
+        await bot.delete_message(chat_id=chat_id, message_id=call.message.message_id)
         keyboard = InlineKeyboardMarkup(row_width=5) 
         buttons = [InlineKeyboardButton(text=str(i), callback_data=f'balance_{i}') for i in range(1, 11)]
         keyboard.add(*buttons) 
         keyboard.add(InlineKeyboardButton(text='Назад', callback_data='back'))  # Add the "Назад" button at the end
-        await bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text='Введи кол-во отрисовок:', reply_markup=keyboard)
+        await bot.send_photo(chat_id,
+            photo=open('image source/TON/photo.png', 'rb'),  # Укажите путь к вашей фотографии
+            caption=f'Введи кол-во отрисовок',
+            reply_markup=keyboard
+        )
+     
+
     elif call.data.startswith('balance_'):
         num_draws = int(call.data.split('_')[1])
         amount = 0.1 * num_draws
@@ -331,18 +405,28 @@ async def process_callback_query(call: types.CallbackQuery):
                 
     elif call.data == 'check_subscription':
         if await check_subscription(chat_id):
+            # Создаем клавиатуру с кнопками
             markup = InlineKeyboardMarkup()
             button = InlineKeyboardButton(text="TON", callback_data='TON')
             button1 = InlineKeyboardButton(text="💵Пополнить баланс", callback_data='balance')
             markup.row(button)
             markup.row(button1)
-            await bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text='Подписка подтверждена! Вы можете продолжить.', reply_markup=markup)
+
+            # Изменяем фото и текст сообщения
+            new_photo = InputMediaPhoto(media=InputFile('photo.png'), caption='Подписка подтверждена! Вы можете продолжить.')
+            await bot.edit_message_media(chat_id=chat_id, message_id=call.message.message_id, media=new_photo, reply_markup=markup)
         else:
-            await bot.send_message(chat_id, 'Вы все еще не подписаны на наш канал.', reply_markup=InlineKeyboardMarkup().add(
+            keyboard = InlineKeyboardMarkup().add(
                 InlineKeyboardButton('Подписаться на канал', url=f'https://t.me/{CHANNEL_USERNAME[1:]}'),
                 InlineKeyboardButton('Проверить подписку', callback_data='check_subscription')
-            ))
-    
+            )
+            await bot.edit_message_caption(
+                caption='Вы все еще не подписаны на наш канал.',
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=keyboard
+            )
+
 
     elif call.data == 'TON':
         c.execute("SELECT free_draws FROM users WHERE id=?", (chat_id,))
@@ -368,6 +452,11 @@ text=f'''
             return
         else:
             with open('Image source/TON/ya_example.png', 'rb') as photo_file:
+                await bot.delete_message(chat_id=chat_id, message_id=call.message.message_id)
+                markup = InlineKeyboardMarkup()
+                button_back = InlineKeyboardButton(text="Назад", callback_data='back')
+                markup.row(button_back)
+                
                 await bot.send_photo(
                     chat_id, 
                     photo_file, 
@@ -377,12 +466,14 @@ text=f'''
 <code>Toncoin</code>
 <code>Ваше описание</code><i>(Макс. 160 символов)</i> 
 <code>Ваша ссылка</code>     
-                    ''', 
-                    parse_mode='HTML'  # Directly use Telegram's parse_mode
-                )
+            ''', 
+            reply_markup=markup,
+            parse_mode='HTML'  # Прямое использование Telegram parse_mode
+        )
 
     elif call.data == 'back':
         if await check_subscription(chat_id):
+                await bot.delete_message(chat_id=chat_id, message_id=call.message.message_id)
                 c.execute("SELECT free_draws FROM users WHERE id=?", (chat_id,))
                 free_draws = c.fetchone()[0]
                 markup = InlineKeyboardMarkup()
@@ -390,10 +481,13 @@ text=f'''
                 button1 = InlineKeyboardButton(text="💵Пополнить баланс", callback_data='balance')
                 markup.row(button)
                 markup.row(button1)
-                await bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=f'''
-Количество отрисовок: {free_draws}
 
-Выбери опцию ниже:''', reply_markup=markup)
+                # Заменяем message.answer на message.send_photo
+                await bot.send_photo(chat_id,
+                    photo=open('image source/TON/photo.png', 'rb'),  # Укажите путь к вашей фотографии
+                    caption=f'Количество отрисовок: {free_draws}\nВыбери опцию ниже:',
+                    reply_markup=markup
+                )
                 
         else:
             # Если подписка отсутствует, отправляем сообщение с предложением подписаться
@@ -467,7 +561,7 @@ async def process_qr(message: types.Message):
         tink = Image.open("Image source/TON/ya_balance.png").convert("RGBA")
         qr = Image.open(qr_path).convert("RGBA")
         qr = qr.resize((360, 350))  # При необходимости изменить размер QR-кода
-
+ 
         # Загрузить и изменить размер иконки
         icon = Image.open("Image source/TON/icon.png").convert("RGBA")
         icon_size = (80, 80)  # Размер иконки
@@ -487,31 +581,39 @@ async def process_qr(message: types.Message):
         alpha = 130  # Прозрачность текста (0-255)
 
         
-        pricetime_lines = pricetime.split()
-        max_chars_per_line = 20  # Максимальное количество символов на строке
+        pricetime_lines = pricetime.split()  # Разбить строку на слова
+        max_chars_per_line = 40  # Максимальное количество символов на строке
         lines = []
-        current_line = []
+        current_line = ""
         for word in pricetime_lines:
-            if len(" ".join(current_line + [word])) <= max_chars_per_line:
-                current_line.append(word)
+            if len(current_line + " " + word) <= max_chars_per_line:
+                current_line += " " + word
+                if len(current_line) > max_chars_per_line:  # Проверка длины текущей строки
+                    lines.append(current_line.strip())    # Добавление строки в список
+                    current_line = ""                      # Сброс текущей строки
             else:
-                lines.append(" ".join(current_line))
-                current_line = [word]
+                lines.append(current_line.strip())        # Добавление строки в список
+                current_line = word                       # Начать новую строку с текущего слова
         if current_line:
-            lines.append(" ".join(current_line))
-
+            lines.append(current_line.strip())
+        
+        # Ограничение количества строк до четырёх
+        lines = lines[:4]
+        
+        # Если строк больше четырёх, объединяем оставшиеся строки
+        
+        
         # Создать прозрачное изображение для текста
         text_image = Image.new("RGBA", tink.size, (255, 255, 255, 0))
         d_text = ImageDraw.Draw(text_image)
-
+        
         # Разделить и центрировать каждую строку из lines
         y_text_position = 275
         for line in lines:
             line_width, _ = d_text.textsize(line, font=font_pricetime)
             line_x_position = (tink.width - line_width) // 2
             d_text.text((line_x_position, y_text_position), line, font=font_pricetime, fill=(255, 255, 255, alpha))
-            y_text_position += font_pricetime.getsize(line)[1] + 3
-        
+            y_text_position += font_pricetime.getsize(line)[1]
         
         
         # Рассчитать ширину текста "X"
@@ -563,3 +665,5 @@ async def process_qr(message: types.Message):
     except Exception as e:
         await bot.send_message(message.chat.id, f'Произошла ошибка: {e}')
     
+
+
